@@ -18,6 +18,14 @@ Architecture v2.1 §11 Tier 3 pattern:
   3. Mapper     → parse_race() below
   4. Sync log   → INSERT into archive_entries with archive_type='sync_log'
 
+v0.3.0 (2026-06-23):
+- Fix: RLS rejected all inserts because SET LOCAL app.current_tenant_id was
+  called outside any transaction. SET LOCAL only persists within the current
+  transaction; the conn.execute() wrapper auto-commits, immediately losing
+  the setting. Changed to SET (session-level) which persists for the
+  connection lifetime. This is the standard pattern for short-lived scripts
+  that own their connection end-to-end.
+
 v0.2.0 (2026-06-23):
 - Fix: convert event_date string to datetime.date before asyncpg bind.
   asyncpg 0.30 requires date objects for date columns; the str -> ::date
@@ -245,7 +253,7 @@ async def upsert_to_postgres(races: list[Race], tenant_id: str, student_id: str,
     conn = await asyncpg.connect(dsn)
     try:
         # Set RLS tenant context (per playbook §5.10)
-        await conn.execute(f"SET LOCAL app.current_tenant_id = '{tenant_id}'")
+        await conn.execute(f"SET app.current_tenant_id = '{tenant_id}'")
 
         existing = await conn.fetch("""
             SELECT source_id FROM events
