@@ -18,6 +18,13 @@ Architecture v2.1 §11 Tier 3 pattern:
   3. Mapper     → parse_race() below
   4. Sync log   → INSERT into archive_entries with archive_type='sync_log'
 
+v0.2.0 (2026-06-23):
+- Fix: convert event_date string to datetime.date before asyncpg bind.
+  asyncpg 0.30 requires date objects for date columns; the str -> ::date
+  cast in SQL doesn't help because binding happens before the cast.
+- Cleanup: replace deprecated datetime.utcnow() with timezone-aware
+  datetime.now(timezone.utc).
+
 Reverse-engineered from Sisense network calls. URLs / IDs subject to change
 if USA Swimming reskins Data Hub. Test in staging before any prod cron run
 on a non-trivial cadence.
@@ -28,7 +35,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass, asdict
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from playwright.async_api import async_playwright
@@ -261,7 +268,7 @@ async def upsert_to_postgres(races: list[Race], tenant_id: str, student_id: str,
                 ) VALUES ($1, $2, 'swim_race', $3, $4::date, $5, $6::jsonb, 'private',
                           'usa_swimming_data_hub', $7, $8)
             """, [
-                (tenant_id, student_id, r.title, r.event_date, r.meet,
+                (tenant_id, student_id, r.title, date.fromisoformat(r.event_date), r.meet,
                  json.dumps(r.details), r.source_id, created_by)
                 for r in to_insert
             ])
@@ -281,7 +288,7 @@ async def main():
     created_by = os.environ["CREATED_BY"]
     dsn = os.environ["DATABASE_URL"]
 
-    started_at = datetime.utcnow().isoformat()
+    started_at = datetime.now(timezone.utc).isoformat()
     print(f"[{started_at}] scraping {first} {last} ({club}/{lsc})...")
     races = await fetch_all_times(first, last, club, lsc)
     print(f"fetched {len(races)} races from Data Hub")
