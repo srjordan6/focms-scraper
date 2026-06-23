@@ -1,0 +1,37 @@
+# Render Cron Job spec for daily USA Swimming Data Hub scrape.
+# Add this stanza to focms-mcp/render.yaml or focms-api repo's render.yaml.
+#
+# Schedule: daily at 04:30 UTC (after the NCES cron at 04:00).
+# Build cmd assumes Python 3.12 + Playwright already in the base image,
+# OR install at runtime (slower cold start but no Dockerfile change needed).
+
+services:
+  - type: cron
+    name: usa-swimming-times-refresh
+    runtime: python
+    schedule: "30 4 * * *"
+    buildCommand: |
+      pip install playwright asyncpg
+      playwright install --with-deps chromium
+    startCommand: python usa_swimming_scraper.py
+    envVars:
+      - key: SWIMMER_FIRST_NAME
+        value: John
+      - key: SWIMMER_LAST_NAME
+        value: Jordan
+      - key: SWIMMER_CLUB
+        value: Iron Horse Aquatics
+      - key: SWIMMER_LSC
+        value: NT
+      - key: TENANT_ID
+        value: 019ed384-56fc-7516-bfbf-efaa5231e281
+      - key: STUDENT_ID
+        value: 019ed384-5769-72ca-864a-28e40c4e5d30
+      - key: CREATED_BY
+        value: 019ed384-56d8-77fb-bfe6-00b1d064da18
+      - key: DATABASE_URL
+        sync: false   # set in Render dashboard (PgBouncer DSN)
+
+# IMPORTANT — Render Cron deployment lessons (from playbook §5.4):
+#   - Cron jobs do NOT auto-deploy on git push; manual Build required after code changes.
+#   - Watch first run logs carefully; Playwright cold-start can exceed 60s.

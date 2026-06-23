@@ -1,0 +1,28 @@
+# Render Blueprint for the USA Swimming Data Hub scraper.
+#
+# Service type: Cron Job
+# Schedule:     daily at 04:30 UTC (~22:30 CST night before; 23:30 CDT)
+# Runtime:      Docker (Dockerfile in this repo)
+# Region:       oregon (matches focms-prod-db)
+#
+# Manual deploys required: Render Cron Jobs do NOT auto-deploy on push, even
+# with autoDeploy: true. After every push to main, hit "Manual Deploy" >
+# "Deploy latest commit" in the Render dashboard. See playbook §5.X.
+#
+# Environment variables to set in the dashboard (NOT in this file):
+#   DATABASE_URL    — focms-prod-db internal URL (or PgBouncer)
+#   TENANT_ID       — 019ed384-56fc-7516-bfbf-efaa5231e281
+#   STUDENT_ID      — 019ed384-5769-72ca-864a-28e40c4e5d30
+#   CREATED_BY      — 019ed384-56d8-77fb-bfe6-00b1d064da18
+#   SWIMMER_FIRST_NAME, SWIMMER_LAST_NAME, SWIMMER_CLUB, SWIMMER_LSC
+#                   (defaults to John / Jordan / Iron Horse Aquatics / NT)
+
+services:
+  - type: cron
+    name: usa-swimming-scraper
+    env: docker
+    region: oregon
+    schedule: "30 4 * * *"
+    plan: starter        # 0.5 CPU / 512 MB — Playwright chromium needs ≥256 MB
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true     # NOTE: ignored for Cron Jobs; manual build still required
