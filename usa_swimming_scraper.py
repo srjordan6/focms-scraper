@@ -5,17 +5,19 @@ USA Swimming Data Hub Individual Times Scraper
 Scrapes a swimmer's full career times from USA Swimming Data Hub and upserts
 to Postgres events table (event_type='swim_race', source_system='usa_swimming_data_hub').
 
-v0.4.0 (2026-06-25):
-- Fix: USA Swimming changed form HTML; #firstOrPreferredName no longer exists.
-  Replace ID-only selectors with multi-strategy locators (id, name, placeholder,
-  label, role). Scraper now survives this UI change and future ones.
-- Add: sync_log writes at scraper_start, scraper_success, scraper_failure.
-  Every run leaves a paper trail in archive_entries regardless of outcome.
-- Add: page DOM dump to archive_entries on selector failure. Post-mortem
-  forensics without re-running the scraper.
-- Add: try/except wrapper around main() with full traceback captured into
-  the failure sync_log. Silent failures become visible failures.
+v0.5.0 (2026-06-26):
+- Fix: USA Swimming moved Data Hub to dhy-prod.usaswimming.org with new
+  /search/athlete route. Update SEARCH_URL.
+- Resilience: Replace URL-pattern response matching with shape-based detection.
+  Capture ALL JSON responses during the run; identify person/times responses
+  by their actual body structure (headers contain Name+PersonKey for people;
+  Event+Swim Time+Swim Date for times). Survives future Sisense/backend moves.
+- Add: response_log archive_type. On failure, dumps every JSON response URL
+  and preview to archive_entries. Post-mortem forensics for backend changes.
+- Increased initial page sleep 10s -> 15s for new SPA hydration.
+- More flexible 'See Results' button regex.
 
+v0.4.0 (2026-06-25): Multi-strategy selectors + sync_log + DOM dump on failure.
 v0.3.0 (2026-06-23): RLS session SET fix.
 v0.2.0 (2026-06-23): asyncpg date binding fix.
 v0.1.0 (2026-06-21): initial Playwright Tier 3 scraper.
@@ -33,15 +35,11 @@ from typing import Callable, Optional
 from playwright.async_api import async_playwright, Page
 import asyncpg
 
-SEARCH_URL = "https://data.usaswimming.org/datahub/usas/individualsearch"
-SCRAPER_VERSION = "0.4.0"
+SEARCH_URL = "https://dhy-prod.usaswimming.org/search/athlete"
+SCRAPER_VERSION = "0.5.0"
 
 STROKE_LONG = {"FR": "Free", "BK": "Back", "BR": "Breast", "FL": "Fly", "IM": "IM"}
 
-
-# =============================================================================
-# Race dataclass and parser (unchanged from v0.3.0)
-# =============================================================================
 
 @dataclass
 class Race:
@@ -70,15 +68,9 @@ class Race:
     @property
     def details(self) -> dict:
         d = {
-            "age": self.age,
-            "lsc": self.lsc,
-            "meet": self.meet,
-            "team": self.team,
-            "course": self.course,
-            "points": self.points,
-            "stroke": self.stroke_short,
-            "swim_time": self.swim_time,
-            "distance_m": self.distance_m,
+            "age": self.age, "lsc": self.lsc, "meet": self.meet, "team": self.team,
+            "course": self.course, "points": self.points, "stroke": self.stroke_short,
+            "swim_time": self.swim_time, "distance_m": self.distance_m,
             "time_standard": self.standard,
         }
         if self.is_relay_leg:
@@ -87,7 +79,7 @@ class Race:
 
 
 def _parse_race_row(headers: list, row: list) -> Race:
-    """Map a Sisense JAQL row to a Race dataclass."""
+    """Map a Sisense JAQL row to a Race dataclass. Assumes Sisense shape unchanged."""
     def cell(name):
         idx = headers.index(name)
         return row[idx].get("text", row[idx].get("data"))
@@ -98,44 +90,32 @@ def _parse_race_row(headers: list, row: list) -> Race:
     distance = int(parts[0])
     stroke_short = parts[1]
     course = parts[2]
-
     swim_date = cell("Swim Date")
     m, d, y = swim_date.split("/")
     iso_date = f"{y}-{int(m):02d}-{int(d):02d}"
     date_compact = f"{y}{int(m):02d}{int(d):02d}"
-
     is_relay = swim_time.endswith("r")
     clean_time = swim_time.rstrip("r")
     source_id = f"{date_compact}_{distance}{stroke_short}_{course}_{clean_time}"
     if is_relay:
         source_id += "r"
-
     return Race(
-        source_id=source_id,
-        event_date=iso_date,
-        distance_m=distance,
-        stroke_short=stroke_short,
-        course=course,
-        swim_time=clean_time,
-        is_relay_leg=is_relay,
-        age=int(cell("Age")),
+        source_id=source_id, event_date=iso_date, distance_m=distance,
+        stroke_short=stroke_short, course=course, swim_time=clean_time,
+        is_relay_leg=is_relay, age=int(cell("Age")),
         points=int(cell("Points")) if cell("Points") else None,
-        standard=cell("Time Standard") or None,
-        meet=cell("Meet"),
-        lsc=cell("LSC"),
-        team=cell("Team"),
-        person_key=int(cell("PersonKey")),
-        meet_key=str(cell("MeetKey")),
+        standard=cell("Time Standard") or None, meet=cell("Meet"),
+        lsc=cell("LSC"), team=cell("Team"),
+        person_key=int(cell("PersonKey")), meet_key=str(cell("MeetKey")),
         usas_swim_time_key=str(cell("UsasSwimTimeKey")),
     )
 
 
 # =============================================================================
-# v0.4.0 NEW: Diagnostic helpers (sync_log, dom_dump)
+# Diagnostic helpers
 # =============================================================================
 
 async def _diag_conn():
-    """Open a short-lived connection for diagnostic writes. Caller closes."""
     dsn = os.environ["DATABASE_URL"]
     tenant_id = os.environ["TENANT_ID"]
     conn = await asyncpg.connect(dsn)
@@ -144,8 +124,7 @@ async def _diag_conn():
 
 
 async def _write_sync_log(status: str, summary: str, detail: str = ""):
-    """Write a sync_log archive_entry. status in {'started','success','failure'}.
-    Swallows its own errors to avoid masking the real failure."""
+    """Write a sync_log archive_entry. Swallows its own errors."""
     try:
         conn = await _diag_conn()
         try:
@@ -173,7 +152,7 @@ async def _write_sync_log(status: str, summary: str, detail: str = ""):
 
 
 async def _dump_dom(page: Page, field_name: str):
-    """Dump current page HTML to archive_entries for forensics. Truncates to 50KB."""
+    """Dump page HTML to archive_entries. Truncates to 50KB."""
     try:
         html = await page.content()
         truncated = html[:50000]
@@ -194,7 +173,7 @@ async def _dump_dom(page: Page, field_name: str):
                     $3, $4, $5, 'usa_swimming_scraper', $6, 'private', $7::uuid
                 )
             """, tenant_id, SCRAPER_VERSION,
-                 f"DOM dump - {field_name} selector failure",
+                 f"DOM dump - {field_name} failure",
                  f"Page URL: {url}\nPage title: {title}\nHTML truncated to 50KB.",
                  truncated,
                  f"dom_dump_{timestamp}_{field_name}",
@@ -205,12 +184,95 @@ async def _dump_dom(page: Page, field_name: str):
         print(f"WARN: dom_dump failed: {e}", file=sys.stderr)
 
 
+async def _dump_responses_log(captured: list, label: str):
+    """v0.5.0 NEW: dump summary of ALL captured JSON responses for backend forensics."""
+    try:
+        summary_lines = []
+        for i, r in enumerate(captured):
+            preview = r["body"][:300].replace("\n", " ")
+            summary_lines.append(f"#{i+1} [{r['method']}] {r['url']} - {r['body_length']} bytes")
+            summary_lines.append(f"   preview: {preview!r}")
+        detail_text = "\n".join(summary_lines) if summary_lines else "(no JSON responses captured)"
+
+        conn = await _diag_conn()
+        try:
+            tenant_id = os.environ["TENANT_ID"]
+            created_by = os.environ["CREATED_BY"]
+            now = datetime.now(timezone.utc)
+            timestamp = now.strftime("%Y%m%d_%H%M%S")
+            await conn.execute("""
+                INSERT INTO archive_entries (
+                    id, tenant_id, archive_type, archive_date, version,
+                    title, summary, detail, source, source_id, visibility, created_by
+                ) VALUES (
+                    gen_random_uuid_v7(), $1::uuid, 'response_log', CURRENT_DATE, $2,
+                    $3, $4, $5, 'usa_swimming_scraper', $6, 'private', $7::uuid
+                )
+            """, tenant_id, SCRAPER_VERSION,
+                 f"Response log - {label}",
+                 f"{len(captured)} JSON responses captured during scraper run",
+                 detail_text[:50000],
+                 f"response_log_{timestamp}_{label}",
+                 created_by)
+        finally:
+            await conn.close()
+    except Exception as e:
+        print(f"WARN: response_log failed: {e}", file=sys.stderr)
+
+
 # =============================================================================
-# v0.4.0 NEW: Multi-strategy locators
+# v0.5.0 NEW: Shape-based response detection
+# =============================================================================
+
+def _header_names(body: dict) -> list[str]:
+    """Extract header names from Sisense JAQL response (list of dicts or strings)."""
+    headers = body.get("headers", [])
+    names = []
+    for h in headers:
+        if isinstance(h, dict):
+            names.append(h.get("title", h.get("name", str(h))))
+        else:
+            names.append(str(h))
+    return names
+
+
+def _is_person_search_response(body) -> bool:
+    """Sisense-style person search: dict with headers/values, headers contain Name + PersonKey."""
+    if not isinstance(body, dict):
+        return False
+    if not isinstance(body.get("headers"), list) or not isinstance(body.get("values"), list):
+        return False
+    names = _header_names(body)
+    return "Name" in names and "PersonKey" in names
+
+
+def _is_times_response(body) -> bool:
+    """Sisense-style times: headers contain Event + Swim Time + Swim Date."""
+    if not isinstance(body, dict):
+        return False
+    if not isinstance(body.get("headers"), list) or not isinstance(body.get("values"), list):
+        return False
+    names = _header_names(body)
+    return "Event" in names and "Swim Time" in names and "Swim Date" in names
+
+
+def _find_response_by_shape(captured: list, shape_check) -> tuple:
+    """Return (parsed_body, source_url) for first response matching shape, else (None, None)."""
+    for r in captured:
+        try:
+            body = json.loads(r["body"])
+            if shape_check(body):
+                return body, r["url"]
+        except (json.JSONDecodeError, ValueError, TypeError, KeyError):
+            continue
+    return None, None
+
+
+# =============================================================================
+# Multi-strategy locators (unchanged from v0.4.0)
 # =============================================================================
 
 async def _smart_fill(page: Page, value: str, field_label: str, strategies: list):
-    """Try each locator strategy; first match wins. Dumps DOM and raises on total failure."""
     last_error = None
     for i, strategy in enumerate(strategies):
         try:
@@ -228,7 +290,6 @@ async def _smart_fill(page: Page, value: str, field_label: str, strategies: list
 
 
 async def _smart_click(page: Page, button_label: str, strategies: list):
-    """Try each locator strategy; first match wins."""
     last_error = None
     for i, strategy in enumerate(strategies):
         try:
@@ -245,8 +306,6 @@ async def _smart_click(page: Page, button_label: str, strategies: list):
     raise RuntimeError(f"All {len(strategies)} selector strategies failed for {button_label}. Last error: {last_error}")
 
 
-# Selector strategies for the USA Swimming search form.
-# Tried in order; first that finds an element wins. Defensive against UI changes.
 FIRST_NAME_STRATEGIES = [
     lambda p: p.locator("#firstOrPreferredName"),
     lambda p: p.locator("input[name*='irst' i]"),
@@ -255,7 +314,6 @@ FIRST_NAME_STRATEGIES = [
     lambda p: p.get_by_label(re.compile(r"first.*name|first.*or.*preferred", re.I)),
     lambda p: p.get_by_role("textbox", name=re.compile(r"first", re.I)),
 ]
-
 LAST_NAME_STRATEGIES = [
     lambda p: p.locator("#lastName"),
     lambda p: p.locator("input[name*='ast' i]"),
@@ -264,7 +322,6 @@ LAST_NAME_STRATEGIES = [
     lambda p: p.get_by_label(re.compile(r"last.*name", re.I)),
     lambda p: p.get_by_role("textbox", name=re.compile(r"last", re.I)),
 ]
-
 SUBMIT_STRATEGIES = [
     lambda p: p.locator('button[type="submit"]'),
     lambda p: p.get_by_role("button", name=re.compile(r"search|submit|find", re.I)),
@@ -274,35 +331,46 @@ SUBMIT_STRATEGIES = [
 
 
 # =============================================================================
-# Search and fetch (now using smart selectors)
+# Search and fetch (now using shape-based response detection)
 # =============================================================================
 
 async def find_person_key(first_name: str, last_name: str, club: str, lsc: str) -> int:
     """Search by name, return PersonKey for the club+LSC match."""
+    captured = []
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         ctx = await browser.new_context()
         page = await ctx.new_page()
 
-        person_jaql = []
         async def on_response(resp):
-            if "Public%20Person%20Search/jaql" in resp.url and resp.status == 200:
-                person_jaql.append(await resp.text())
+            try:
+                ct = resp.headers.get("content-type", "").lower()
+                if "json" in ct and resp.status == 200:
+                    body = await resp.text()
+                    captured.append({
+                        "url": resp.url, "status": resp.status,
+                        "method": resp.request.method, "body": body,
+                        "body_length": len(body),
+                    })
+            except Exception:
+                pass
         page.on("response", on_response)
 
         await page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=60000)
-        await asyncio.sleep(10)
+        await asyncio.sleep(15)
         await _smart_fill(page, first_name, "firstName", FIRST_NAME_STRATEGIES)
         await _smart_fill(page, last_name, "lastName", LAST_NAME_STRATEGIES)
         await _smart_click(page, "submitSearch", SUBMIT_STRATEGIES)
-        await asyncio.sleep(8)
+        await asyncio.sleep(10)
         await browser.close()
 
-    if not person_jaql:
-        raise RuntimeError("No Public Person Search JAQL response captured")
+    body, url = _find_response_by_shape(captured, _is_person_search_response)
+    if not body:
+        await _dump_responses_log(captured, "personSearch_not_found_findKey")
+        raise RuntimeError(f"Person search response not in {len(captured)} captured JSON responses")
+    print(f"person search response shape-matched at {url}")
 
-    body = json.loads(person_jaql[0])
-    H = body["headers"]
+    H = _header_names(body)
     for row in body["values"]:
         clb = row[H.index("Club")]["data"]
         lsc_val = row[H.index("LSC")]["data"]
@@ -314,38 +382,45 @@ async def find_person_key(first_name: str, last_name: str, club: str, lsc: str) 
 
 async def fetch_all_times(first_name: str, last_name: str, club: str, lsc: str) -> list[Race]:
     """Drive the full search → click flow, capture full times response."""
+    captured = []
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         ctx = await browser.new_context(viewport={"width": 1400, "height": 1400})
         page = await ctx.new_page()
 
-        person_responses = []
-        times_responses = []
         async def on_response(resp):
             try:
-                if "Public%20Person%20Search/jaql" in resp.url and resp.status == 200:
-                    person_responses.append(await resp.text())
-                elif "USA%20Swimming%20Times%20Elasticube/jaql" in resp.url and resp.status == 200:
-                    times_responses.append(await resp.text())
+                ct = resp.headers.get("content-type", "").lower()
+                if "json" in ct and resp.status == 200:
+                    body = await resp.text()
+                    captured.append({
+                        "url": resp.url, "status": resp.status,
+                        "method": resp.request.method, "body": body,
+                        "body_length": len(body),
+                    })
             except Exception:
                 pass
         page.on("response", on_response)
 
         await page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=60000)
-        await asyncio.sleep(10)
+        await asyncio.sleep(15)
         await _smart_fill(page, first_name, "firstName", FIRST_NAME_STRATEGIES)
         await _smart_fill(page, last_name, "lastName", LAST_NAME_STRATEGIES)
         await _smart_click(page, "submitSearch", SUBMIT_STRATEGIES)
-        await asyncio.sleep(8)
+        await asyncio.sleep(10)
 
-        if not person_responses:
-            await _dump_dom(page, "personSearchJAQL")
+        # Find target row by shape, get its index for "See Results" click
+        person_body, person_url = _find_response_by_shape(captured, _is_person_search_response)
+        if not person_body:
+            await _dump_dom(page, "personSearchPage")
+            await _dump_responses_log(captured, "personSearch_not_found_fetchTimes")
             await browser.close()
-            raise RuntimeError("Person search JAQL not captured")
-        people = json.loads(person_responses[0])
-        H = people["headers"]
+            raise RuntimeError(f"Person search response not in {len(captured)} captured JSON responses")
+        print(f"person search response shape-matched at {person_url}")
+
+        H = _header_names(person_body)
         target_idx = None
-        for i, row in enumerate(people["values"]):
+        for i, row in enumerate(person_body["values"]):
             clb = row[H.index("Club")]["data"]
             lsc_val = row[H.index("LSC")]["data"]
             if club.lower() in clb.lower() and lsc_val.upper() == lsc.upper():
@@ -355,32 +430,22 @@ async def fetch_all_times(first_name: str, last_name: str, club: str, lsc: str) 
             await browser.close()
             raise RuntimeError(f"No match for {first_name} {last_name} at {club}/{lsc}")
 
-        # See Results / View Results / Times - flexible button text match
+        # Flexible button text - new SPA may use different labels
         await page.evaluate(f"""() => {{
-            const buttons = Array.from(document.querySelectorAll('button'))
-                .filter(b => /see.*results|view.*results|view.*times|times/i.test(b.textContent || ''));
+            const buttons = Array.from(document.querySelectorAll('button, a'))
+                .filter(b => /see.*results|view.*results|view.*times|view.*details|times|results/i.test((b.textContent||'').trim()));
             if (buttons.length > {target_idx}) buttons[{target_idx}].click();
         }}""")
-        await asyncio.sleep(25)
+        await asyncio.sleep(30)
         await browser.close()
 
-    if not times_responses:
-        raise RuntimeError("Times Elasticube JAQL not captured - swimmer found but times never loaded")
+    times_body, times_url = _find_response_by_shape(captured, _is_times_response)
+    if not times_body:
+        await _dump_responses_log(captured, "times_not_found")
+        raise RuntimeError(f"Times response not in {len(captured)} captured JSON responses - swimmer found but times never loaded")
+    print(f"times response shape-matched at {times_url}")
 
-    best = None
-    for body_str in times_responses:
-        try:
-            body = json.loads(body_str)
-            hs = body.get("headers", [])
-            if "Event" in hs and "Swim Time" in hs and "Swim Date" in hs:
-                if best is None or len(body.get("values", [])) > len(best.get("values", [])):
-                    best = body
-        except Exception:
-            continue
-    if not best:
-        raise RuntimeError("No times JAQL response with race columns")
-
-    return [_parse_race_row(best["headers"], r) for r in best["values"]]
+    return [_parse_race_row(_header_names(times_body), r) for r in times_body["values"]]
 
 
 async def upsert_to_postgres(races: list[Race], tenant_id: str, student_id: str, created_by: str, dsn: str):
@@ -388,7 +453,6 @@ async def upsert_to_postgres(races: list[Race], tenant_id: str, student_id: str,
     conn = await asyncpg.connect(dsn)
     try:
         await conn.execute(f"SET app.current_tenant_id = '{tenant_id}'")
-
         existing = await conn.fetch("""
             SELECT source_id FROM events
             WHERE event_type = 'swim_race'
@@ -397,11 +461,9 @@ async def upsert_to_postgres(races: list[Race], tenant_id: str, student_id: str,
               AND deleted_at IS NULL
         """, student_id)
         existing_ids = {r["source_id"] for r in existing}
-
         to_insert = [r for r in races if r.source_id not in existing_ids]
         if not to_insert:
             return 0, len(races), len(races)
-
         async with conn.transaction():
             await conn.executemany("""
                 INSERT INTO events (
@@ -419,10 +481,6 @@ async def upsert_to_postgres(races: list[Race], tenant_id: str, student_id: str,
         await conn.close()
 
 
-# =============================================================================
-# Entry point with sync_log instrumentation
-# =============================================================================
-
 async def main():
     """CLI / Render Cron entrypoint."""
     first = os.environ.get("SWIMMER_FIRST_NAME", "John")
@@ -435,12 +493,12 @@ async def main():
     dsn = os.environ["DATABASE_URL"]
 
     started_at = datetime.now(timezone.utc).isoformat()
-    print(f"[{started_at}] scraping {first} {last} ({club}/{lsc})...")
+    print(f"[{started_at}] scraping {first} {last} ({club}/{lsc}) via {SEARCH_URL}...")
 
     await _write_sync_log(
         "started",
         f"Scraper v{SCRAPER_VERSION} starting for {first} {last} ({club}/{lsc})",
-        f"started_at={started_at}\nfirst={first}\nlast={last}\nclub={club}\nlsc={lsc}"
+        f"started_at={started_at}\nsearch_url={SEARCH_URL}\nfirst={first}\nlast={last}\nclub={club}\nlsc={lsc}"
     )
 
     try:
@@ -466,7 +524,7 @@ async def main():
             f"started_at={started_at}\nfailed_at={datetime.now(timezone.utc).isoformat()}\n"
             f"error_type={type(e).__name__}\nerror_message={str(e)}\n\nTraceback:\n{tb}"
         )
-        raise  # Re-raise so Render Cron marks run as failed
+        raise
 
 
 if __name__ == "__main__":
