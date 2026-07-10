@@ -11,7 +11,6 @@ Schedule: 30 4 * * * (daily 04:30 UTC). Manual Build after every code change.
 Jobs:
   birthday-billing        daily    age-band membership re-billing (T-7 charge,
                                    birthday hold, emails)
-  usa-swimming-scraper    daily    John's swim times from USA Swimming Data Hub
   nces-scorecard-refresh  monthly  (1st of month) target-university data refresh
 
 To add a job: append a row to JOBS. gate=None means every run.
@@ -30,7 +29,6 @@ NOW = datetime.now(timezone.utc)
 JOBS = [
     # (name, argv, gate: callable -> bool | None for always)
     ("birthday-billing", [sys.executable, "focms_birthday_billing.py"], None),
-    ("usa-swimming-scraper", [sys.executable, "usa_swimming_scraper.py"], None),
     ("nces-scorecard-refresh", [sys.executable, "nces_scorecard_worker.py", "refresh-targets"],
      lambda: NOW.day == 1),
 ]

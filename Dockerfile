@@ -6,7 +6,6 @@
 # Entry point: focms_nightly_jobs.py runs every job in an isolated subprocess:
 #   birthday-billing        daily    age-band membership re-billing
 #   nces-scorecard-refresh  monthly  (1st) target-university data refresh
-#   usa-swimming-scraper    daily    Data Hub swim times
 #
 # Render Cron Jobs build this from the repo root on every Manual Build.
 # (Cron Jobs do NOT auto-deploy on push - operational trap per playbook §5.X.)
@@ -24,12 +23,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY focms_nightly_jobs.py .
 COPY focms_birthday_billing.py .
 COPY nces_scorecard_worker.py .
-COPY usa_swimming_scraper.py .
 
 # Unbuffered stdout so Render captures logs in real time.
 ENV PYTHONUNBUFFERED=1
 
 # Single entry point; jobs read their config from env vars
-# (DATABASE_URL, STRIPE_SECRET_KEY, GMAIL_SMTP_*, SCORECARD_API_KEY,
-#  TENANT_ID, STUDENT_ID, CREATED_BY, SWIMMER_*).
+# (DATABASE_URL, STRIPE_SECRET_KEY, GMAIL_SMTP_*, SCORECARD_API_KEY).
 CMD ["python", "focms_nightly_jobs.py"]
