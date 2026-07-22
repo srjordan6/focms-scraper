@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-focms_nightly_jobs.py v0.3.0 (2026-07-19)
+focms_nightly_jobs.py v0.4.0 (2026-07-22)
 
 NorthStar-Scraper cron entry point - runs every scheduled NorthStar job in
 sequence, each isolated in its own subprocess so one failure never blocks the
@@ -11,15 +11,12 @@ Schedule: 30 4 * * * (daily 04:30 UTC). Manual Build after every code change.
 Jobs:
   birthday-billing        daily    age-band membership re-billing (T-7 charge,
                                    birthday hold, emails)
-  usa-swimming-scrape     daily    v0.3.0: multi-tenant swim sync driven by
-                                   student_external_identifiers
-                                   (system_name='usa_swimming'); scraper
-                                   v0.6.0 discovery mode captures Data Hub
-                                   JSON to response_log + updates sync
-                                   status per swimmer. Was in the repo but
-                                   never in JOBS - the cron ran for weeks
-                                   without it.
   nces-scorecard-refresh  monthly  (1st of month) target-university data refresh
+  usnews-admissions       daily    v0.4.0: fills admissions address/URL for all
+                                   US-News-ranked schools (Target Schools
+                                   dropdown, 104 schools) via Scorecard
+                                   refresh-ranked mode. Nightly until complete,
+                                   then switch its gate to weekly (Sundays).
 
 To add a job: append a row to JOBS. gate=None means every run.
 """
@@ -37,9 +34,14 @@ NOW = datetime.now(timezone.utc)
 JOBS = [
     # (name, argv, gate: callable -> bool | None for always)
     ("birthday-billing", [sys.executable, "focms_birthday_billing.py"], None),
-    ("usa-swimming-scrape", [sys.executable, "usa_swimming_scraper.py"], None),
     ("nces-scorecard-refresh", [sys.executable, "nces_scorecard_worker.py", "refresh-targets"],
      lambda: NOW.day == 1),
+    # v0.4.0 (2026-07-22): fill admissions address/URL for every US-News-ranked
+    # school (the Target Schools dropdown set, 104 schools) via Scorecard.
+    # Runs NIGHTLY so the ranked list fills fast; once complete, switch the gate
+    # to weekly by replacing None with:  lambda: NOW.weekday() == 6  (Sundays).
+    ("usnews-admissions", [sys.executable, "nces_scorecard_worker.py", "refresh-ranked"],
+     None),
 ]
 
 
