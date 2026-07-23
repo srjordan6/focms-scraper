@@ -1,8 +1,25 @@
-"""nces_scorecard_worker.py - College Scorecard + NCES Ingestion Worker v0.3
+"""nces_scorecard_worker.py - College Scorecard + NCES Ingestion Worker v0.5
 
 Pulls institution-level data from the U.S. Department of Education's College
 Scorecard API and upserts into the FOCMS universities and university_cds_facts
 tables.
+
+v0.5 (2026-07-23) — additive over v0.3:
+  * NEW run mode `refresh-all` — every row in universities (~6,100 colleges).
+    `universities` is the single source of truth; the US News National and
+    Liberal Arts lists are just that table filtered on us_news_rank_national /
+    us_news_rank_liberal_arts. Refreshing only the ranked subset left ~5,500
+    colleges with no cost, no test bands and no address — and those are exactly
+    the rows an IPEDS search returns. This is now the nightly mode.
+  * NEW universities columns written directly (previously these lived only in
+    university_cds_facts, so the portal could not read them): tuition
+    (out-of-state), sat_25, sat_75, act_25, act_75. SAT band = the 25th/75th
+    section percentiles summed, which reproduces the published mid-50% range.
+  * Upserts now COMMIT IN BATCHES (500 rows). A 6,100-row single transaction
+    held locks for minutes and lost everything on any late failure; batching
+    keeps partial progress and shortens lock windows.
+  * Test-optional schools legitimately publish no scores. Those stay NULL —
+    an accurate gap is worth more than an invented number.
 
 v0.3 (2026-07-22) — additive over v0.2:
   * NEW admissions fields pulled from Scorecard and written to the universities
@@ -29,7 +46,8 @@ Run modes:
     refresh-top-n     - refresh top N schools by admit selectivity
     refresh-targets   - refresh just the schools in target_universities (RLS)
     refresh-leaids    - refresh a comma-separated list of LEAIDs
-    refresh-ranked    - refresh every school with a US News rank (NEW v0.3)
+    refresh-ranked    - refresh every school with a US News rank (v0.3)
+    refresh-all       - refresh EVERY college in universities (NEW v0.5)
 
 Environment:
     DATABASE_URL_POOLED       - pgbouncer URL (transaction mode), preferred
@@ -68,7 +86,15 @@ SCORECARD_FIELDS = [
     "latest.admissions.act_scores.midpoint.cumulative",
     "latest.cost.attendance.academic_year",
     "latest.student.size",
+    # v0.5: fields that feed the universities columns the portal reads.
+    "latest.admissions.sat_scores.25th_percentile.math",
+    "latest.admissions.sat_scores.25th_percentile.critical_reading",
+    "latest.admissions.act_scores.25th_percentile.cumulative",
+    "latest.admissions.act_scores.75th_percentile.cumulative",
+    "latest.cost.tuition.out_of_state",
 ]
+
+UPSERT_BATCH = 500  # rows per transaction; see v0.5 notes
 
 
 def _safe_tenant(tid: str) -> str:
@@ -119,8 +145,34 @@ def _norm_url(u: str | None) -> str | None:
     return u
 
 
+def _sat_band(row: dict[str, Any], pct: str) -> int | None:
+    """Combined SAT for one percentile = section math + section reading.
+
+    Scorecard publishes the two sections separately; summing the same
+    percentile reproduces the total band colleges publish (e.g. 1510-1580).
+    Returns None unless BOTH sections are present - half a band is misleading.
+    """
+    m = row.get(f"latest.admissions.sat_scores.{pct}.math")
+    r = row.get(f"latest.admissions.sat_scores.{pct}.critical_reading")
+    if m is None or r is None:
+        return None
+    try:
+        return int(round(float(m) + float(r)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_int(v: Any) -> int | None:
+    if v is None:
+        return None
+    try:
+        return int(round(float(v)))
+    except (TypeError, ValueError):
+        return None
+
+
 def row_to_universities(row: dict[str, Any]) -> dict[str, Any]:
-    """Flatten a Scorecard row into the universities table shape (v0.3)."""
+    """Flatten a Scorecard row into the universities table shape (v0.5)."""
     return {
         "leaid": str(row.get("id")),
         "name": row.get("school.name"),
@@ -133,6 +185,12 @@ def row_to_universities(row: dict[str, Any]) -> dict[str, Any]:
         # v0.3 admissions fields
         "admissions_address": _compose_address(row),
         "admissions_url": _norm_url(row.get("school.school_url")),
+        # v0.5 columns the portal reads directly
+        "tuition": row.get("latest.cost.tuition.out_of_state"),
+        "sat_25": _sat_band(row, "25th_percentile"),
+        "sat_75": _sat_band(row, "75th_percentile"),
+        "act_25": _as_int(row.get("latest.admissions.act_scores.25th_percentile.cumulative")),
+        "act_75": _as_int(row.get("latest.admissions.act_scores.75th_percentile.cumulative")),
     }
 
 
@@ -180,10 +238,12 @@ async def upsert_universities(conn: asyncpg.Connection, rows: list[dict[str, Any
             INSERT INTO universities (leaid, name, city, state, admit_rate,
                                      cost_attendance, enrollment_total, data_year,
                                      admissions_address, admissions_url,
-                                     admissions_source, admissions_updated_at)
+                                     admissions_source, admissions_updated_at,
+                                     tuition, sat_25, sat_75, act_25, act_75)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                     CASE WHEN $11 THEN 'scorecard_api' ELSE NULL END,
-                    CASE WHEN $11 THEN now() ELSE NULL END)
+                    CASE WHEN $11 THEN now() ELSE NULL END,
+                    $12, $13, $14, $15, $16)
             ON CONFLICT (leaid) DO UPDATE SET
                 name = EXCLUDED.name,
                 city = EXCLUDED.city,
@@ -196,10 +256,17 @@ async def upsert_universities(conn: asyncpg.Connection, rows: list[dict[str, Any
                 admissions_url = COALESCE(EXCLUDED.admissions_url, universities.admissions_url),
                 admissions_source = CASE WHEN $11 THEN 'scorecard_api' ELSE universities.admissions_source END,
                 admissions_updated_at = CASE WHEN $11 THEN now() ELSE universities.admissions_updated_at END,
+                tuition = COALESCE(EXCLUDED.tuition, universities.tuition),
+                sat_25 = COALESCE(EXCLUDED.sat_25, universities.sat_25),
+                sat_75 = COALESCE(EXCLUDED.sat_75, universities.sat_75),
+                act_25 = COALESCE(EXCLUDED.act_25, universities.act_25),
+                act_75 = COALESCE(EXCLUDED.act_75, universities.act_75),
                 updated_at = now()
         """, r["leaid"], r["name"], r["city"], r["state"],
              r["admit_rate"], r["cost_attendance"], r["enrollment_total"], r["data_year"],
-             r.get("admissions_address"), r.get("admissions_url"), has_adm)
+             r.get("admissions_address"), r.get("admissions_url"), has_adm,
+             r.get("tuition"), r.get("sat_25"), r.get("sat_75"),
+             r.get("act_25"), r.get("act_75"))
         n += 1
     return n
 
@@ -238,6 +305,13 @@ async def resolve_leaids(mode: str, value: str | None, pool) -> list[str]:
                 "   OR us_news_rank_liberal_arts IS NOT NULL"
             )
             return [r["leaid"] for r in rows]
+    if mode == "refresh-all":
+        # v0.5: the whole catalog. universities is the source of truth and the
+        # US News lists are filtered views of it, so the refresh set is every
+        # college - not the ranked subset.
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("SELECT leaid FROM universities ORDER BY leaid")
+            return [r["leaid"] for r in rows]
     if mode == "refresh-targets":
         if not TENANT_ID:
             raise RuntimeError("FOCMS_TENANT_ID required for refresh-targets mode")
@@ -273,15 +347,21 @@ async def main_async(mode: str, value: str | None) -> None:
             return
         rows = await fetch_scorecard(leaids)
         log.info("fetched %d scorecard rows", len(rows))
+        # v0.5: commit in batches. One transaction over ~6,100 rows held locks
+        # for minutes and discarded every row if the tail failed.
+        n_uni = n_facts = 0
         async with pool.acquire() as conn:
-            async with conn.transaction():
-                n_uni = await upsert_universities(
-                    conn, [row_to_universities(r) for r in rows]
-                )
-                fact_batches: list[dict[str, Any]] = []
-                for r in rows:
-                    fact_batches.extend(row_to_cds_facts(r))
-                n_facts = await upsert_cds_facts(conn, fact_batches)
+            for i in range(0, len(rows), UPSERT_BATCH):
+                chunk = rows[i:i + UPSERT_BATCH]
+                async with conn.transaction():
+                    n_uni += await upsert_universities(
+                        conn, [row_to_universities(r) for r in chunk]
+                    )
+                    facts: list[dict[str, Any]] = []
+                    for r in chunk:
+                        facts.extend(row_to_cds_facts(r))
+                    n_facts += await upsert_cds_facts(conn, facts)
+                log.info("committed %d/%d universities", n_uni, len(rows))
         log.info("upserted universities=%d cds_facts=%d", n_uni, n_facts)
     finally:
         await pool.close()
@@ -290,7 +370,8 @@ async def main_async(mode: str, value: str | None) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["refresh-top-n", "refresh-targets",
-                                     "refresh-leaids", "refresh-ranked"])
+                                     "refresh-leaids", "refresh-ranked",
+                                     "refresh-all"])
     ap.add_argument("--value", help="n for top-n, or comma-separated leaids")
     args = ap.parse_args()
     asyncio.run(main_async(args.mode, args.value))
