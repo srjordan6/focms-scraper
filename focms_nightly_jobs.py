@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-focms_nightly_jobs.py v0.6.0 (2026-07-23)
+focms_nightly_jobs.py v0.7.0 (2026-07-23)
 
 NorthStar-Scraper cron entry point - runs every scheduled NorthStar job in
 sequence, each isolated in its own subprocess so one failure never blocks the
@@ -16,14 +16,15 @@ Jobs:
                                    admit rate, enrolment) for EVERY college in
                                    the universities table, not just the ranked
                                    ones.
-  ipeds-hd-refresh        weekly   (Sundays) directory data the Scorecard does
-                                   not carry: institutional phone (GENTELE),
-                                   street address, city/state/ZIP, website and
+  ipeds-hd-refresh        monthly  (1st) directory data the Scorecard does not
+                                   carry: institutional phone (GENTELE), street
+                                   address, city/state/ZIP, website and
                                    admissions URL, from the IPEDS HD file, for
                                    EVERY college. Every write is COALESCE-
                                    guarded, so it fills gaps and never
-                                   overwrites curated values. Weekly because HD
-                                   is published annually - nightly is noise.
+                                   overwrites curated values. Monthly because HD
+                                   is an ANNUAL publication - re-parsing the
+                                   same flat file weekly changed nothing.
 
 ONE LIST, ONE TRUTH
   `universities` is the single source of truth: every college we know about.
@@ -63,9 +64,12 @@ JOBS = [
      None),
     # IPEDS HD carries what the Scorecard has no field for at all: the
     # institutional telephone (GENTELE), street address and admissions URL.
-    # HD is published annually, so Sundays is ample.
+    # v0.7.0: monthly, not weekly. HD is an annual publication - four runs a
+    # month re-parsed an identical 1.1 MB file and wrote nothing new. The 1st
+    # shares the day with nces-scorecard-refresh; both are cheap and the jobs
+    # run sequentially in isolated subprocesses, so there is no contention.
     ("ipeds-hd-refresh", [sys.executable, "ipeds_hd_worker.py", "refresh-all"],
-     lambda: NOW.weekday() == 6),
+     lambda: NOW.day == 1),
 ]
 
 
