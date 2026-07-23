@@ -20,9 +20,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Job sources.
-COPY focms_nightly_jobs.py .
-COPY focms_birthday_billing.py .
-COPY nces_scorecard_worker.py .
+COPY *.py .
 
 # Unbuffered stdout so Render captures logs in real time.
 ENV PYTHONUNBUFFERED=1
