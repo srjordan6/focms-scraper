@@ -21,6 +21,7 @@ jobs:
 
   semgrep:
     name: Semgrep SAST
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     container:
       image: semgrep/semgrep
@@ -37,6 +38,7 @@ jobs:
 
   trivy:
     name: Trivy dependencies + IaC
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -58,6 +60,7 @@ jobs:
 
   gitleaks:
     name: Gitleaks secrets
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -70,6 +73,7 @@ jobs:
 
   codeql:
     name: CodeQL (${{ matrix.language }})
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
