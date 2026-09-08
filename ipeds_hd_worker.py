@@ -81,7 +81,7 @@ def download_hd():
         url = HD_URL.format(year=year)
         try:
             req = Request(url, headers={"User-Agent": UA})
-            with urlopen(req, timeout=120) as resp:
+            with urlopen(req, timeout=120) as resp:  # nosemgrep: fixed https nces.ed.gov template; year is int-constrained (candidate_years)
                 if resp.status != 200:
                     last_err = f"HTTP {resp.status} for {url}"
                     continue
@@ -201,7 +201,7 @@ async def run(mode):
     tag = f"ipeds_hd{year}"
     conn = await asyncpg.connect(dsn)
     try:
-        targets = [r["leaid"] for r in await conn.fetch(TARGET_SQL[mode])]
+        targets = [r["leaid"] for r in await conn.fetch(TARGET_SQL[mode])]  # nosemgrep: TARGET_SQL is a static dict of constants keyed by validated mode
         log.info("mode=%s targets=%s", mode, len(targets))
 
         matched = updated = no_phone = missing = 0

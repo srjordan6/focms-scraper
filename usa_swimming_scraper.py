@@ -5,6 +5,9 @@ USA Swimming Data Hub Scraper - Multi-Tenant
 Scrapes USA Swimming Data Hub for all enrolled swimmers across all tenants
 and upserts to Postgres events + personal_records tables.
 
+v0.6.1 (2026-09-07): tenant_id validated as a UUID before the RLS SET
+  interpolation in _diag_conn (Semgrep sqli class; interpolation itself stays
+  per the PgBouncer rule - parameterized set_config hangs in transaction mode).
 v0.6.0 (2026-06-26): DISCOVERY MODE + MULTI-TENANT
 - BREAKING ARCHITECTURE CHANGE. No longer reads SWIMMER_* env vars.
   Reads student_external_identifiers WHERE system_name='usa_swimming'
@@ -30,6 +33,7 @@ import json
 import os
 import sys
 import traceback
+import uuid as uuidlib
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Optional
@@ -37,7 +41,7 @@ from typing import Optional
 from playwright.async_api import async_playwright, Page
 import asyncpg
 
-SCRAPER_VERSION = "0.6.0"
+SCRAPER_VERSION = "0.6.1"
 STROKE_LONG = {"FR": "Free", "BK": "Back", "BR": "Breast", "FL": "Fly", "IM": "IM"}
 
 
@@ -69,10 +73,16 @@ class Race:
 # =============================================================================
 
 async def _diag_conn(tenant_id: str):
-    """Open a short-lived connection with tenant context set."""
+    """Open a short-lived connection with tenant context set.
+
+    The tenant id is validated as a real UUID before interpolation; the
+    f-string itself is the sanctioned PgBouncer pattern (parameterized
+    set_config hangs through transaction-mode pooling).
+    """
+    tid = str(uuidlib.UUID(tenant_id))  # raises ValueError on anything else
     dsn = os.environ["DATABASE_URL"]
     conn = await asyncpg.connect(dsn)
-    await conn.execute(f"SET app.current_tenant_id = '{tenant_id}'")
+    await conn.execute(f"SET app.current_tenant_id = '{tid}'")  # nosemgrep: validated UUID literal, PgBouncer rule
     return conn
 
 

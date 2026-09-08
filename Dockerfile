@@ -25,6 +25,10 @@ COPY *.py .
 # Unbuffered stdout so Render captures logs in real time.
 ENV PYTHONUNBUFFERED=1
 
+# Run as the image's built-in non-root user (Semgrep missing-user; jobs only
+# write to the DB and stdout, and headless chromium prefers non-root anyway).
+USER pwuser
+
 # Single entry point; jobs read their config from env vars
 # (DATABASE_URL, STRIPE_SECRET_KEY, GMAIL_SMTP_*, SCORECARD_API_KEY).
 CMD ["python", "focms_nightly_jobs.py"]

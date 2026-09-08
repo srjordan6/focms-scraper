@@ -318,7 +318,7 @@ async def resolve_leaids(mode: str, value: str | None, pool) -> list[str]:
         tenant = _safe_tenant(TENANT_ID)
         async with pool.acquire() as conn:
             async with conn.transaction():
-                await conn.execute(f"SET LOCAL app.current_tenant_id = '{tenant}'")
+                await conn.execute(f"SET LOCAL app.current_tenant_id = '{tenant}'")  # nosemgrep: tenant is _safe_tenant()-validated UUID; PgBouncer rule (see header note 1/2)
                 rows = await conn.fetch(
                     "SELECT DISTINCT university_leaid FROM target_universities "
                     "WHERE deleted_at IS NULL AND is_active = true"
