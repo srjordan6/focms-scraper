@@ -73,6 +73,12 @@ EXTRACTION_RUN_ID = "scorecard_api_latest"  # stable so upsert is idempotent
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("nces-scorecard-worker")
+# 2026-10-16: httpx logs every request URL at INFO, and the Scorecard API key
+# rides in the query string, so the key was written to focms-nightly.log in
+# plain text ~120 times a night (and was most of the log's volume). Keep httpx
+# at WARNING so only failures surface; our own chunk lines still log progress.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 SCORECARD_BASE = "https://api.data.gov/ed/collegescorecard/v1/schools"
 SCORECARD_FIELDS = [

@@ -57,6 +57,8 @@ import asyncpg
 LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 log = logging.getLogger("ipeds-hd")
+logging.getLogger("httpx").setLevel(logging.WARNING)  # 2026-10-16: no per-request URL spam
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 HD_URL = "https://nces.ed.gov/ipeds/datacenter/data/HD{year}.zip"
 UA = "Mozilla/5.0 (compatible; FOCMS-IPEDS-Worker/0.1)"
