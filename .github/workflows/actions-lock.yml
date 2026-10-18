@@ -1,0 +1,42 @@
+name: Actions lockfile
+
+# Stale-lockfile check for .github/workflows/actions.lock (public preview,
+# https://docs.github.com/actions/concepts/security/workflow-dependency-lockfiles).
+# Fails when a workflow's uses: dependencies are not all locked, or when a
+# locked commit no longer matches its tag. Regenerate with `gh actions-lock`;
+# never edit the lockfile by hand. Dependabot regenerates the entry itself
+# when it bumps an action in an onboarded workflow.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - '**/action.yml'
+      - '**/action.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '**/action.yml'
+      - '**/action.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify actions.lock is current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install gh-actions-lock
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh extension install github/gh-actions-lock --pin v0.2.0
+      - name: Verify lockfile (read-only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh actions-lock --verify
